@@ -1,0 +1,19 @@
+RND: Rounds Played
+R: Rating (VLR system)
+ACS: Average Combat Score
+K:D: Kills:Deaths
+KAST: Kills Assists Trades Survivability Percentage
+ADR: Average Damage per Round
+KPR: Kills Per Round
+APR: Assists Per Round
+FKPR: First Kills Per Round
+FDPR: First Deaths Per Round
+HS%: Headshot Percentage
+CL%: Clutch Success Percentage
+CL: Clutches (won/played)
+KMAX: Maximum Kills in a single map
+K: Kills
+D: Deaths
+A: Assists
+FK: First Kills
+Team: Team

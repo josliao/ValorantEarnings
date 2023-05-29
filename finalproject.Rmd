@@ -1,0 +1,369 @@
+---
+title: "Valorant Winnings Prediction"
+author: "Joshua Liao"
+date: "Due March 19th, 2023"
+output:
+    html_document:
+      toc: true
+      toc_float: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE,
+                      warning = FALSE, cache=TRUE)
+library(knitr)
+library(tidyverse)
+library(tidymodels)
+library(dplyr)
+library(ggplot2)
+library(corrplot)
+library(stargazer)
+library(vip)
+library(caret)
+library(yardstick)
+library(kableExtra)
+```
+
+### Background
+
+Professional VALORANT is a competitive esports scene centered around the popular team-based first-person shooter game VALORANT. In professional VALORANT, teams of five players compete against each other in various tournaments and leagues for prize money, trophies, and recognition.
+
+The game is played on a round-by-round basis, with each round consisting of a team of attackers trying to plant a bomb (the Spike) at one of several designated locations, while the defending team tries to prevent the bomb from being planted or defuse it if it has been planted. The first team to win 13 rounds wins the match.
+
+Professional VALORANT teams typically consist of highly skilled and experienced players who have developed their skills through rigorous training and practice. Teams often have specific roles, such as entry fraggers, support players, and in-game leaders, and work together to execute complex strategies and outplay their opponents.
+
+There are several professional VALORANT leagues and tournaments, including the Riot Games' official VALORANT Champions Tour, which features various regional competitions culminating in a global championship, as well as third-party events organized by other esports organizations. The professional VALORANT scene continues to grow in popularity, with increasing numbers of players and viewers worldwide, and promises to be a significant force in the world of competitive esports in the years to come.
+
+![Fig 1. VCT Stage, The World Championship for Valorant ](.\images\vctstage.jpg){width="200"}
+
+
+### Overview of research question
+
+The idea of this project is to take competitive game statistics of current professional Valorant Esports players to obtain a model to predict their success in Esports in terms of monetary value. The current winnings are numeric in value and offer a clear picture in the success of a player. A win is not necessarily dependent on any particular predictor variable and instead can be a combination of them. These questions will be answered best through regression. This model will be predictive in nature as it will allow us to assess the probable success of future professional players based on limited statistics. 
+
+![Fig 2. My Good Buddy Sentinel Tenz ](.\images\tenz.jpg){width="200"}
+
+### Overview of dataset
+
+The data will consist of a player's agents, rounds played, rating, average combat score, Kills:Deaths, KAST score, Average Damage per Round, Kills Per Round, Assists Per Round, First Kills Per Round, First Deaths Per Round, Headshot Percentage, and Clutch Percentage. The data will come from a compiled database of Valorant statistics located at: https://www.vlr.gg/stats. In order to complete this project in a timely matter; the data will only consist of North American Players; still leaving us with about 300-400 observations. We will be using 13 predictor variables.
+
+### Importing and Cleaning Datasets 
+
+The first step is to import and clean the data from vlr.gg/stats. The player statistics dataset was obtained by having Python read the html table element then creating a dataframe. For the winnings, BeautifulSoup was used to scrape the data from the VLR website since the winnings were not included on the table and instead on each player's personal profile. Lastly for team and country, the data was obtained by creating a dataset from selecting the html elements within the table to input into a new dataframe. Both Python files are included in the .zip file. 
+
+```{r}
+#Here we read in the csv files
+playerwinnings<-read.csv("data/player_winnings_full.csv")
+playerstats<-read.csv("data/vlr.csv")
+playerteam<-read.csv("data/playerandteam.csv")
+playercountry<-read.csv("data/playerandcountry.csv")
+
+#Since the csv's do not have overlapping columns, we append the Player variable to match player_short
+words <- strsplit(playerstats$Player, "\\s+")
+playerstats$player_short <- sapply(words, function(x) ifelse(length(x) > 1, paste(x[-length(x)], collapse = " "), x))
+playerwinnings<-playerwinnings%>%select(player_short, winnings)
+playerwinnings$winnings <- as.numeric(gsub("[^0-9\\.]+", "", playerwinnings$winnings))
+
+#Here we match our "by" variable in each dataset so we can merge
+playerstats$player_short<-tolower(playerstats$player_short)
+playerteam$player_short<-tolower(playerteam$player_short)
+playercountry$player_short<-tolower(playercountry$player_short)
+
+#Merging the datasets
+vlrdata<-merge(playerstats, playerwinnings, by = "player_short")
+vlrdata<-merge(vlrdata, playerteam, by="player_short")
+vlrdata<-merge(vlrdata, playercountry, by="player_short")
+
+#Capitalize country code (For aesthetic purposes)
+vlrdata$Country<-toupper(vlrdata$Country)
+
+#Here I noticed that there were duplicated rows due to some players switching teams, so I removed the duplicated rows
+duplicated_rows <- duplicated(vlrdata[, c("player_short", "winnings")])
+vlrdata <- subset(vlrdata, !duplicated_rows)
+
+#These variables were in character format and I changed them to numeric
+vlrdata$KAST <- as.numeric(gsub("%", "", vlrdata$KAST))/100
+vlrdata$HS. <- as.numeric(gsub("%", "", vlrdata$HS.))/100
+vlrdata$CL. <- as.numeric(gsub("%", "", vlrdata$CL.))/100
+vlrdata$winnings <- as.integer(vlrdata$winnings)
+
+#Removing irrelevant columns
+vlrdata<-vlrdata%>%select(-Player, -Agents, -CL)
+
+#Mutating the Team variable so that we can use it as a predictor
+vlrdata<-vlrdata%>%
+  mutate(Team=factor(Team))
+
+```
+The final codebook is included in the .zip file.
+
+### Exploratory Data Analysis
+
+Here a lot of our exploratory Data Analysis will go towards analyzing the distribution of our target variable, winnings. First we start off with a simple histogram to better visualize the distribution.
+
+```{r}
+histogram(x=vlrdata$winnings)
+```
+
+It seems the distribution is incredibly zero-inflated making it hard for us to easily apply any kind of shape to it. I'll apply a log function to the target variable to see if we can get a nicer shaped distribution.
+
+```{r}
+# We add 1 so that the entries with 0 are included
+vlrdata$logwinnings <- log(vlrdata$winnings) 
+histogram(x=vlrdata$logwinnings)
+```
+
+Looking at this there doesn't seem to be a specific model that is easily applicable to this data distribution. I'll try removing the zero's to see if it will normalize.
+
+```{r}
+vlrdatanozero<- subset(vlrdata, !vlrdata$winnings==0)
+histogram(x=vlrdatanozero$logwinnings)
+```
+
+Here we have a nicely shaped distribution that our models can work with. Dropping the zeros will impact the general applicability of the model, but it'll be a limitation of this project that we can deal with. 
+
+We can also look at some of the descriptive statistics in the dataset as well to obtain information to the numeric predictor variables.
+
+```{r}
+summary(vlrdatanozero)
+```
+### Graphs of univariate, multivariate relationships between outcome and predictor(s) or between predictors
+
+When thinking about the amount of money a player has made in playing tournaments, one would assume that the amount of rounds they have played will increase the likelihood of winnings right? Here we plot logwinnings against rounds played to see if there is a relationship.
+
+```{r}
+vlrdatanozero %>% ggplot() + aes(x=Rnd, y=logwinnings, color=Rnd)+geom_point()
+```
+We can see that Rounds played does have a linear correlation with logwinnings.
+
+Next, I want to see whether Average Combat Score has a relationship with Kills, which is a general assumption.
+
+```{r}
+vlrdatanozero %>% ggplot() + aes(x=ACS, y=K, color=ACS)+geom_point()
+```
+Surprisingly Kills do not have that much of an impact on ACS. This is surprising because one assumes that combat score is indicative of Kills.
+
+
+### Setting Up Our Model
+
+In order to begin building our model, we first stratify the data by country to ensure that each region is adequately represented, as different regions signify varying tournaments and cash values. Then we take the split and create a training and testing set.
+
+```{r}
+set.seed(123)
+vlr_split<-initial_split(vlrdatanozero, prop=0.75, strata=Country)
+vlr_train<-training(vlr_split)
+vlr_test<-testing(vlr_split)
+dim(vlr_train)
+dim(vlr_test)
+```
+
+Next, we use *v*-fold cross-validation on the training set using 5 folds and again stratifying on country. The advantage of v-fold cross-validation is that it provides a more accurate estimate of model performance than simply splitting the data into a single training and validation set. This is because it uses all available data for training and validation, rather than just a single split of the data. It also reduces the variance of the estimate by averaging over multiple folds, which can be particularly useful when the dataset is small.
+
+```{r}
+set.seed(123)
+vlr_fold<- vfold_cv(data = vlr_train, v = 5, strata = Country) 
+```
+
+Now that we have the data set up for the model, I wanted to see which variables performed the best in the Variable Importance Plot in order to select the variables to include.
+
+```{r}
+model <- train(logwinnings~Rnd+R+ACS+K.D+ADR+KPR+APR+FKPR+FDPR+KMax+K+D+A+FK+FD, data = na.omit(vlr_train), method = "rf")
+vip(model, bar="horizontal", main="Variable Importance Plot")
+```
+
+Here we create a correlation plot of all the variables in the training set to analyze whether certain variables are colinear.
+
+```{r}
+num_vars <- names(vlr_train)[sapply(vlr_train, is.numeric)]
+corr <- cor(vlr_train[, num_vars])
+corrplot(corr, type="upper")
+```
+
+The correlation plot shows us that several variables are highly colinear, which gives us reference to which features we should omit from our final recipe.
+
+### Model Building
+
+Now we finally get to the bread and butter of the project. To start things off, using the features I selected in the last section I create a recipe for all of the models that I intend to test.
+
+```{r}
+recipe_vlr<-recipe(logwinnings~A+K+Rnd+D+FD+FK+R+K.D+Team, vlr_train)%>%
+  step_center(all_numeric_predictors())%>%
+  step_scale(all_numeric_predictors())%>%
+  step_dummy(Team)%>%
+  step_impute_mean(all_numeric_predictors()) %>%
+  step_normalize(all_numeric_predictors())
+```
+
+Let's break it down step by step:
+
+1. recipe(logwinnings~A+K+Rnd+D+FD+FK+R+K.D+Team, vlr_train) creates a recipe object with the dependent variable logwinnings and independent variables A, K, Rnd, D, FD, FK, R, K.D, Team. The data used for the recipe is the vlr_train data frame.
+
+2. step_center(all_numeric_predictors()) centers all numeric predictors, which means that it subtracts the mean from each variable so that they have a mean of 0.
+
+3. step_scale(all_numeric_predictors()) scales all numeric predictors, which means that it divides each variable by its standard deviation so that they have a standard deviation of 1.
+
+4. step_dummy(Team) creates dummy variables for the Team variable. This means that it converts the categorical variable Team into multiple binary variables, one for each unique value in Team. 
+
+5. step_impute_mean(all_numeric_predictors()) imputes missing values in all numeric predictors with the mean of each variable.
+
+6. step_normalize(all_numeric_predictors()) normalizes all numeric predictors, which means that it scales each variable to have a range of 0 to 1.
+
+Next I chose 4 models that we had covered in class that deal with regression based problems and I set each of them up and added a workflow which will pipeline the data and help me fit and tune the model to the training set.
+
+I started with a linear regression model, which is a popular model for predicting continuous dependent variables that have a linear relationship with the independent variables. If the dependent variable follows a normal distribution, linear regression could be a good choice.
+
+```{r}
+linmodel <- linear_reg() %>%
+  set_engine("lm")%>%
+  set_mode("regression")
+  
+linworkflow <- workflow() %>%
+  add_recipe(recipe_vlr) %>%
+  add_model(linmodel)
+```
+
+Next I chose Elastic Net regression which can be a good choice for predicting Valorant pro player winnings, especially if there are a large number of predictors that may be correlated with each other.
+
+```{r}
+elasticnet <- linear_reg(penalty = tune(), mixture = tune()) %>% 
+  set_mode("regression") %>% 
+  set_engine("glmnet", standardize = FALSE)
+
+enworkflow <- workflow() %>% 
+  add_recipe(recipe_vlr) %>% 
+  add_model(elasticnet)
+
+engrid <- grid_regular(
+  penalty(),
+  mixture(),
+  levels = 20)
+```
+
+After that I chose Random Forest which can handle a large number of predictors, including both categorical and continuous variables, and can effectively capture nonlinear and interaction effects among predictors. It can also handle missing data, as it uses only the available predictors for each split. 
+
+Mtry is a parameter that specifies the number of variables randomly sampled as candidates at each split when building a random forest model.
+
+Trees is a parameter specifies the number of trees to be grown in the forest.
+Min_n is a parameter specifies the minimum number of samples required to be present in a leaf node.
+
+```{r}
+rfmodel <- rand_forest(mtry=tune(), trees=tune(), min_n=tune()) %>% 
+  set_engine("ranger") %>% 
+  set_mode("regression")
+
+rfworkflow <- workflow() %>% 
+    add_recipe(recipe_vlr) %>% 
+    add_model(rfmodel)
+
+rfgrid <- grid_regular(
+  mtry(range = c(1, 9)),
+  trees(range = c(1, 400)),
+  min_n(range = c(2, 20)),
+  levels = 10)
+```
+
+Next, we use the fit_resamples() and tune_grid() functions in R to fit and evaluate the performance of the linear regression, random forest, and Elastic Net regression models created earlier.
+
+```{r}
+lin_results<- fit_resamples(linworkflow, vlr_fold, metrics = metric_set(rmse))
+
+rf_results <- tune_grid(rfworkflow, resamples = vlr_fold, grid = rfgrid, metrics = metric_set(rmse), control = control_grid(verbose = TRUE))
+autoplot(rf_results)
+
+en_results <- tune_grid(enworkflow, resamples = vlr_fold, grid = engrid, metrics = metric_set(rmse), control = control_grid(verbose = TRUE))
+autoplot(en_results)
+```
+
+The random forest plot seems to indicate that there is not that large of a difference in RMSE between different selections of the covariates.
+
+Here we choose the best performing from each of our models using the criteria of RMSE.
+
+```{r}
+lin_best <- select_best(lin_results, "rmse")
+rf_best <- select_best(rf_results, "rmse")
+en_best <- select_best(en_results, "rmse")
+```
+
+Using the 'finalize_workflow' function to create the final workflow for each model using the best model parameters (lin_best, rf_best, and en_best), then using the fit function to fit the final workflow to the training data (vlr_train), we finally use the augment function to obtain predicted values for the test data (vlr_test).
+
+```{r}
+lin_final <- finalize_workflow(linworkflow, lin_best)
+lin_final_fit <- fit(lin_final, data = vlr_train)
+linpredicted_data <- augment(lin_final_fit, new_data = vlr_test) %>% 
+  select(logwinnings, starts_with(".pred"))
+
+rf_final <- finalize_workflow(rfworkflow, rf_best)
+rf_final_fit <- fit(rf_final, data = vlr_train)
+rfpredicted_data <- augment(rf_final_fit, new_data = vlr_test) %>% 
+  select(logwinnings, starts_with(".pred"))
+
+en_final <- finalize_workflow(enworkflow, en_best)
+en_final_fit <- fit(en_final, data = vlr_train)
+enpredicted_data <- augment(en_final_fit, new_data = vlr_test) %>% 
+  select(logwinnings, starts_with(".pred"))
+```
+
+
+### Model Selection and Performance
+
+Now that we've put our models against the testing data, we can assess the performance of each model using Mean Squared Error, RMSE, and R-Squared.
+
+```{r}
+#Here I define each of the functions I want in the global R environment
+  datamse <- function(actual, predicted)mean((actual - predicted)^2)
+  
+  datarmse <- function(actual, predicted) 
+    sqrt(datamse(actual, predicted))
+  
+  datarsq <- function(actual, predicted) {
+    1 - sum((actual - predicted)^2)/sum((actual - mean(actual))^2)}
+  datamae <- function(actual, predicted) {
+  mean(abs(actual - predicted))}
+  
+#Linear Regression Performance
+linmse <- datamse(linpredicted_data$logwinnings, linpredicted_data$.pred)
+linrmse <- datarmse(linpredicted_data$logwinnings, linpredicted_data$.pred)
+linr2 <- datarsq(linpredicted_data$logwinnings, linpredicted_data$.pred)
+linmae <- datamae(linpredicted_data$logwinnings, linpredicted_data$.pred)
+cat(sprintf("MSE: %.2f\nRMSE: %.2f\nR-squared: %.2f\nMAE: %2f", linmse, linrmse, linr2, linmae))
+
+#Random Forest Performance
+rfmse <- datamse(rfpredicted_data$logwinnings, rfpredicted_data$.pred)
+rfrmse <- datarmse(rfpredicted_data$logwinnings, rfpredicted_data$.pred)
+rfr2 <- datarsq(rfpredicted_data$logwinnings, rfpredicted_data$.pred)
+rfmae <- datamae(rfpredicted_data$logwinnings, rfpredicted_data$.pred)
+cat(sprintf("MSE: %.2f\nRMSE: %.2f\nR-squared: %.2f\nMAE: %2f", rfmse, rfrmse, rfr2, rfmae))
+
+#Elastic Net Performance
+enmse <- datamse(enpredicted_data$logwinnings, enpredicted_data$.pred)
+enrmse <- datarmse(enpredicted_data$logwinnings, enpredicted_data$.pred)
+enr2 <- datarsq(enpredicted_data$logwinnings, enpredicted_data$.pred)
+enmae <- datamae(enpredicted_data$logwinnings, enpredicted_data$.pred)
+cat(sprintf("MSE: %.2f\nRMSE: %.2f\nR-squared: %.2f\nMAE: %2f", enmse, enrmse, enr2, enmae))
+```
+
+```{r}
+pmodel <- c("Linear Regression", "Random Forest", "Elastic Net")
+pmse <- c(linmse, rfmse, enmse)
+prmse <- c(linrmse, rfrmse, enrmse)
+pr2 <- c(linr2, rfr2, enr2)
+pmae <- c(linmae, rfmae, enmae)
+pdf <- data.frame(pmodel, pmse, prmse, pr2, pmae)
+
+# Use the kable function to create a nicely formatted table
+kable(pdf, align = "c", caption = "Performance metrics for three models") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"))
+```
+From these performance metrics we can select Elastic Net as the best model to use in our case of valorant winnings.
+
+A model with an MSE of 1.13 and RMSE of 1.06 means that on average, the model's predicted values are about 1.06 units away from the actual values of the target variable, which is the Valorant winnings in this case. This is not a very large error and indicates that the model is able to make reasonably accurate predictions.
+
+The R-squared value of 0.67 indicates that approximately 67% of the variance in the target variable can be explained by the model. This means that the model is able to capture some of the variability in the data, but there is still a significant amount of variability that is not accounted for by the model.
+
+### Conclusion
+
+#### Does this model fulfill our project's purpose?
+
+In terms of predicting Valorant winnings, the performance of the model is reasonable but not perfect. The error rate of the model is relatively low, which suggests that it can be useful for making predictions. However, the R-squared value indicates that there is still a significant amount of unexplained variability in the data, and the model may not be able to capture all the factors that influence Valorant winnings. The benefit of this model however, is that its simplicity makes it easy and cheap to implement.
+
+It's also important to consider the context in which the model is being used. For example, if the model is being used to predict Valorant winnings for professional players, the model's performance may be different when applied to amateur or semi-professional players. Additionally, the model can only be applied to players who have already won games, so those who haven't won anything cannot be included in this model. 
